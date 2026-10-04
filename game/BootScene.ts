@@ -3,6 +3,8 @@
 // puts a character on it, and lets the player walk around.
 
 import Phaser from "phaser";
+// The on-screen joystick (a React component) writes its position into this object.
+import { joystick } from "@/game/inputState";
 
 // How fast the character walks, in pixels per second.
 const SPEED = 70;
@@ -133,8 +135,15 @@ export class BootScene extends Phaser.Scene {
     const down = this.cursors.down.isDown || this.keys.S.isDown;
 
     // Turn the keys into a direction: -1, 0 or 1 on each axis.
-    const vx = (right ? 1 : 0) - (left ? 1 : 0);
-    const vy = (down ? 1 : 0) - (up ? 1 : 0);
+    let vx = (right ? 1 : 0) - (left ? 1 : 0);
+    let vy = (down ? 1 : 0) - (up ? 1 : 0);
+
+    // If the on-screen joystick is being pushed, it takes over from the keyboard.
+    // Its values are between -1 and 1 on each axis.
+    if (joystick.x !== 0 || joystick.y !== 0) {
+      vx = joystick.x;
+      vy = joystick.y;
+    }
     const body = this.player.body as Phaser.Physics.Arcade.Body;
 
     // No keys pressed: stop, and show the standing pose.
@@ -149,11 +158,13 @@ export class BootScene extends Phaser.Scene {
     body.setVelocity(vx, vy);
     body.velocity.normalize().scale(SPEED);
 
-    // Pick which way to face. Left and right win over up and down.
-    if (vx < 0) this.facing = "left";
-    else if (vx > 0) this.facing = "right";
-    else if (vy < 0) this.facing = "up";
-    else this.facing = "down";
+    // Pick which way to face: whichever direction is pushed harder.
+    // On a tie (like walking diagonally) left and right win.
+    if (Math.abs(vx) >= Math.abs(vy)) {
+      this.facing = vx < 0 ? "left" : "right";
+    } else {
+      this.facing = vy < 0 ? "up" : "down";
+    }
 
     // Play the walking animation for that direction.
     this.player.anims.play(`walk-${this.facing}`, true);
