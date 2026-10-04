@@ -17,8 +17,22 @@ export default function Game() {
         constructor() {
           super("boot");
         }
+
+        preload() {
+          this.load.image("urban", "/assets/tiles/tilemap_packed.png");
+          this.load.tilemapTiledJSON("test-map", "/assets/maps/test-map.tmj");
+        }
+
         create() {
-          this.add.text(16, 16, "Akure City Life", { color: "#ffffff" });
+          const map = this.make.tilemap({ key: "test-map" });
+          const tileset = map.addTilesetImage("urban", "urban");
+          if (!tileset) return;
+
+          map.createLayer("Ground", tileset);
+          map.createLayer("Buildings", tileset);
+
+          const collision = map.createLayer("Collision", tileset);
+          collision?.setVisible(false);
         }
       }
 
