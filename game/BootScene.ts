@@ -1,10 +1,10 @@
 // game/BootScene.ts
 // A "scene" in Phaser is one screen of the game. This one loads the test map,
-// puts a character on it, and lets the player walk around.
+// puts a character on it, and lets the player walk around by tapping or by keyboard.
 
 import Phaser from "phaser";
-// The on-screen joystick (a React component) writes its position into this object.
-import { joystick } from "@/game/inputState";
+// EasyStar finds a walkable route between two tiles on a grid (the A* algorithm).
+import * as EasyStar from "easystarjs";
 
 // How fast the character walks, in pixels per second.
 const SPEED = 70;
@@ -27,8 +27,15 @@ const COLS = 27;
 const FIRST_ROW = 15;
 const FIRST_COL = 23;
 
+// When the character is this close (in pixels) to the middle of a tile,
+// we count it as arrived and head for the next tile on the route.
+const ARRIVE_DISTANCE = 3;
+
 // The four directions the character can face.
 type Dir = "left" | "down" | "up" | "right";
+
+// A position on the map grid, counted in tiles (not pixels).
+type TilePos = { x: number; y: number };
 
 // Which column (counting from FIRST_COL) shows each direction.
 const OFFSET: Record<Dir, number> = { left: 0, down: 1, up: 2, right: 3 };
@@ -46,6 +53,10 @@ export class BootScene extends Phaser.Scene {
   private cursors!: Phaser.Types.Input.Keyboard.CursorKeys; // arrow keys
   private keys!: Record<"W" | "A" | "S" | "D", Phaser.Input.Keyboard.Key>; // WASD keys
   private facing: Dir = "down"; // the direction the character is facing now
+
+  // The route finder, and the tiles left to walk on the current route.
+  private finder = new EasyStar.js();
+  private path: TilePos[] = [];
 
   constructor() {
     // "boot" is the name of this scene.
@@ -132,6 +143,65 @@ export class BootScene extends Phaser.Scene {
     // The true after the player keeps the pixel art sharp while moving.
     camera.startFollow(this.player, true, 0.1, 0.1);
 
+    // ---- Tap to walk ----
+
+    // Turn the Collision layer into a grid for the route finder.
+    // 1 means a wall, 0 means a tile you can walk on.
+    const grid: number[][] = [];
+    for (let y = 0; y < map.height; y++) {
+      const row: number[] = [];
+      for (let x = 0; x < map.width; x++) {
+        row.push(collision.getTileAt(x, y) ? 1 : 0);
+      }
+      grid.push(row);
+    }
+    this.finder.setGrid(grid);
+    this.finder.setAcceptableTiles([0]); // only tiles marked 0 can be walked on
+
+    // A small yellow ring that pops up where you tapped.
+    const showMarker = (tileX: number, tileY: number) => {
+      const ring = this.add.circle(
+        tileX * TILE_SIZE + TILE_SIZE / 2,
+        tileY * TILE_SIZE + TILE_SIZE / 2,
+        5,
+        0xf2a900,
+        0.9,
+      );
+      ring.setDepth(9);
+      // Grow and fade out, then remove it.
+      this.tweens.add({
+        targets: ring,
+        scale: 2,
+        alpha: 0,
+        duration: 450,
+        onComplete: () => ring.destroy(),
+      });
+    };
+
+    // When the screen is tapped or clicked, find a route there and start walking.
+    this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      // worldX and worldY are the tap position on the map, already
+      // adjusted for camera zoom and scrolling. Divide by tile size to get the tile.
+      const endX = Math.floor(pointer.worldX / TILE_SIZE);
+      const endY = Math.floor(pointer.worldY / TILE_SIZE);
+
+      // Ignore taps outside the map.
+      if (endX < 0 || endY < 0 || endX >= map.width || endY >= map.height) return;
+
+      // Start from the tile under the character's feet.
+      const feet = this.player.body as Phaser.Physics.Arcade.Body;
+      const startX = Math.floor(feet.center.x / TILE_SIZE);
+      const startY = Math.floor(feet.center.y / TILE_SIZE);
+
+      this.finder.findPath(startX, startY, endX, endY, (route) => {
+        // route is null when there is no way to get there, like tapping a wall.
+        if (!route) return;
+        // The first tile is where we already stand, so skip it.
+        this.path = route.slice(1);
+        showMarker(endX, endY);
+      });
+    });
+
     // Create one walking animation for each direction.
     // The order is step 1, stand, step 2, stand, which looks like walking.
     (["left", "down", "up", "right"] as Dir[]).forEach((dir) => {
@@ -155,6 +225,9 @@ export class BootScene extends Phaser.Scene {
   update() {
     if (!this.player) return; // nothing to move if create() stopped early
 
+    // Let the route finder do a little work each frame.
+    this.finder.calculate();
+
     // Check which keys are held down right now.
     const left = this.cursors.left.isDown || this.keys.A.isDown;
     const right = this.cursors.right.isDown || this.keys.D.isDown;
@@ -164,16 +237,33 @@ export class BootScene extends Phaser.Scene {
     // Turn the keys into a direction: -1, 0 or 1 on each axis.
     let vx = (right ? 1 : 0) - (left ? 1 : 0);
     let vy = (down ? 1 : 0) - (up ? 1 : 0);
-
-    // If the on-screen joystick is being pushed, it takes over from the keyboard.
-    // Its values are between -1 and 1 on each axis.
-    if (joystick.x !== 0 || joystick.y !== 0) {
-      vx = joystick.x;
-      vy = joystick.y;
-    }
     const body = this.player.body as Phaser.Physics.Arcade.Body;
 
-    // No keys pressed: stop, and show the standing pose.
+    if (vx !== 0 || vy !== 0) {
+      // Pressing a key cancels any tap route, so the keyboard always wins.
+      this.path = [];
+    } else {
+      // No keys pressed: follow the tap route, if there is one.
+      while (this.path.length > 0) {
+        const next = this.path[0];
+        // The middle of the next tile, and how far the feet are from it.
+        const dx = next.x * TILE_SIZE + TILE_SIZE / 2 - body.center.x;
+        const dy = next.y * TILE_SIZE + TILE_SIZE / 2 - body.center.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist < ARRIVE_DISTANCE) {
+          // Reached this tile, so move on to the next one.
+          this.path.shift();
+          continue;
+        }
+        // Head toward the middle of the next tile.
+        vx = dx / dist;
+        vy = dy / dist;
+        break;
+      }
+    }
+
+    // Nothing to do: stop, and show the standing pose.
     if (vx === 0 && vy === 0) {
       body.setVelocity(0, 0);
       this.player.anims.stop();

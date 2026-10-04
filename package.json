@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "easystarjs": "^0.4.4",
     "next": "16.3.8",
     "phaser": "^4.2.1",
     "react": "19.2.8",

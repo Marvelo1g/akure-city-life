@@ -1,10 +1,9 @@
 "use client";
 
 // components/Game.tsx
-// Starts the Phaser game inside the page and shows the on-screen joystick on top.
+// Starts the Phaser game inside the page.
 
 import { useEffect, useRef } from "react";
-import Joystick from "@/components/Joystick";
 
 export default function Game() {
   // The empty box Phaser draws its canvas into.
@@ -48,8 +47,6 @@ export default function Game() {
   return (
     <div className="relative h-dvh w-full touch-none overflow-hidden">
       <div ref={holder} className="h-full w-full" />
-      {/* Only visible on touch screens. */}
-      <Joystick />
     </div>
   );
 }
