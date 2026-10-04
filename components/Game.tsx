@@ -24,13 +24,14 @@ export default function Game() {
       game = new Phaser.Game({
         type: Phaser.AUTO,
         parent: holder.current,
-        width: 480, // game width in pixels
-        height: 320, // game height in pixels
+        // Fill the whole screen. The camera zoom (in BootScene) decides how much map we see.
+        width: "100%",
+        height: "100%",
         backgroundColor: "#0e1a2e",
         pixelArt: true, // keep pixel art sharp, no blurring
         physics: { default: "arcade", arcade: { debug: false } },
-        // Scale the game to fit the screen and keep it centered.
-        scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+        // RESIZE makes the game match the screen shape, in portrait or landscape.
+        scale: { mode: Phaser.Scale.RESIZE },
         scene: [BootScene],
       });
     })();
@@ -42,8 +43,10 @@ export default function Game() {
     };
   }, []);
 
+  // h-dvh fits phones whose address bar grows and shrinks.
+  // touch-none stops the browser from scrolling or zooming while you play.
   return (
-    <div className="relative h-screen w-full">
+    <div className="relative h-dvh w-full touch-none overflow-hidden">
       <div ref={holder} className="h-full w-full" />
       {/* Only visible on touch screens. */}
       <Joystick />

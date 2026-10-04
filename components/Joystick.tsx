@@ -9,7 +9,7 @@ import type { PointerEvent } from "react";
 import { joystick } from "@/game/inputState";
 
 // How far the knob can move from the center, in pixels.
-const RADIUS = 48;
+const RADIUS = 36;
 // Pushes smaller than this (out of 1) are ignored, so a resting thumb does not move the player.
 const DEADZONE = 0.2;
 
@@ -80,13 +80,13 @@ export default function Joystick() {
       onPointerMove={onMove}
       onPointerUp={onUp}
       onPointerCancel={onUp}
-      className="fixed left-6 hidden h-32 w-32 touch-none select-none rounded-full border border-white/30 bg-white/10 [@media(pointer:coarse)]:block"
+      className="fixed left-6 hidden h-24 w-24 touch-none select-none rounded-full border border-white/30 bg-white/10 [@media(pointer:coarse)]:block"
       // Keep it above the phone's bottom bar.
       style={{ bottom: "calc(24px + env(safe-area-inset-bottom, 0px))" }}
     >
       {/* The knob that follows the thumb. */}
       <div
-        className="absolute left-1/2 top-1/2 -ml-6 -mt-6 h-12 w-12 rounded-full bg-white/50"
+        className="absolute left-1/2 top-1/2 -ml-5 -mt-5 h-10 w-10 rounded-full bg-white/50"
         style={{ transform: `translate(${knob.x}px, ${knob.y}px)` }}
       />
     </div>

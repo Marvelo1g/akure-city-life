@@ -9,9 +9,12 @@ import { joystick } from "@/game/inputState";
 // How fast the character walks, in pixels per second.
 const SPEED = 70;
 
-// How much the camera zooms in. 2 means everything looks twice as big,
-// so the map is larger than the screen and the camera has room to scroll.
-const ZOOM = 2;
+// The size of one map tile in pixels.
+const TILE_SIZE = 16;
+
+// How many tiles we want to see across the shorter side of the screen.
+// The camera zooms in or out to match, so phones and laptops both look right.
+const TILES_ACROSS = 12;
 
 // The tilesheet is a grid of 16 by 16 pixel squares, 27 squares wide.
 // Phaser numbers every square from 0, left to right then top to bottom,
@@ -100,7 +103,18 @@ export class BootScene extends Phaser.Scene {
     // Camera: make the view follow the player so the map scrolls as they walk.
     const camera = this.cameras.main;
     camera.setBounds(0, 0, map.widthInPixels, map.heightInPixels); // never show outside the map
-    camera.setZoom(ZOOM); // zoom in so there is more map than screen
+
+    // Work out how far to zoom for this screen. Whole numbers keep pixel art sharp.
+    const applyZoom = () => {
+      const shorterSide = Math.min(this.scale.width, this.scale.height);
+      camera.setZoom(Math.max(1, Math.floor(shorterSide / (TILE_SIZE * TILES_ACROSS))));
+    };
+    applyZoom();
+    // Zoom again whenever the screen changes size, like turning the phone sideways.
+    this.scale.on("resize", applyZoom);
+    // Stop listening when this scene ends, so nothing is left running.
+    this.events.once("shutdown", () => this.scale.off("resize", applyZoom));
+
     // The 0.1 values make the camera glide after the player instead of snapping.
     // The true after the player keeps the pixel art sharp while moving.
     camera.startFollow(this.player, true, 0.1, 0.1);
