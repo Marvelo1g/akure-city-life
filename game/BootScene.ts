@@ -104,10 +104,23 @@ export class BootScene extends Phaser.Scene {
     const camera = this.cameras.main;
     camera.setBounds(0, 0, map.widthInPixels, map.heightInPixels); // never show outside the map
 
-    // Work out how far to zoom for this screen. Whole numbers keep pixel art sharp.
+    // Work out how far to zoom for this screen.
     const applyZoom = () => {
       const shorterSide = Math.min(this.scale.width, this.scale.height);
-      camera.setZoom(Math.max(1, Math.floor(shorterSide / (TILE_SIZE * TILES_ACROSS))));
+
+      // The zoom we would like: about 12 tiles across the shorter side.
+      // Math.round (not floor) so a 360 pixel wide phone gets zoom 2 instead of 1.
+      const wanted = Math.max(1, Math.round(shorterSide / (TILE_SIZE * TILES_ACROSS)));
+
+      // The smallest zoom that makes the map cover the whole screen, so there
+      // are no empty dark areas around it.
+      const cover = Math.max(
+        this.scale.width / map.widthInPixels,
+        this.scale.height / map.heightInPixels,
+      );
+
+      // Use whichever is bigger, so the map always fills the screen.
+      camera.setZoom(Math.max(wanted, cover));
     };
     applyZoom();
     // Zoom again whenever the screen changes size, like turning the phone sideways.
