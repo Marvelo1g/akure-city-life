@@ -5,6 +5,8 @@
 import Phaser from "phaser";
 // EasyStar finds a walkable route between two tiles on a grid (the A* algorithm).
 import * as EasyStar from "easystarjs";
+// Our connection to the game server, and the shape of a player's shared data.
+import { joinCity, type CityRoom, type NetPlayer } from "@/game/network";
 
 // How fast the character walks, in pixels per second.
 const SPEED = 70;
@@ -30,6 +32,13 @@ const FIRST_COL = 23;
 // When the character is this close (in pixels) to the middle of a tile,
 // we count it as arrived and head for the next tile on the route.
 const ARRIVE_DISTANCE = 3;
+
+// Other players all use the same character picture for now, so we tint them
+// different colours to tell them apart. Real avatars come with the character creator.
+const REMOTE_TINTS = [0xffd27f, 0x9fd3ff, 0xffa8a8, 0xb7f0b1, 0xe0b3ff, 0xfff1a8];
+
+// How often (in milliseconds) we tell the server where we are while walking.
+const SEND_EVERY_MS = 100;
 
 // The four directions the character can face.
 type Dir = "left" | "down" | "up" | "right";
@@ -57,6 +66,17 @@ export class BootScene extends Phaser.Scene {
   // The route finder, and the tiles left to walk on the current route.
   private finder = new EasyStar.js();
   private path: TilePos[] = [];
+
+  // The other players in the city. For each one we keep the picture we draw
+  // and the live data the server sends about them (position, direction, walking).
+  private others = new Map<string, { sprite: Phaser.GameObjects.Sprite; net: NetPlayer }>();
+
+  // Our connection to the city room on the server. Empty until we have connected.
+  private room?: CityRoom;
+
+  // When we last told the server where we are, and whether we were walking then.
+  private lastSent = 0;
+  private wasMoving = false;
 
   constructor() {
     // "boot" is the name of this scene.
@@ -219,6 +239,13 @@ export class BootScene extends Phaser.Scene {
     const keyboard = this.input.keyboard!;
     this.cursors = keyboard.createCursorKeys();
     this.keys = keyboard.addKeys("W,A,S,D") as typeof this.keys;
+
+    // Join the city on the server. If the server is off, the game still works alone.
+    void this.connect();
+    // Leave the room politely when this scene ends.
+    this.events.once("shutdown", () => {
+      void this.room?.leave();
+    });
   }
 
   // update() runs about 60 times every second. It handles movement.
@@ -227,6 +254,9 @@ export class BootScene extends Phaser.Scene {
 
     // Let the route finder do a little work each frame.
     this.finder.calculate();
+
+    // Move the other players' pictures toward where the server says they are.
+    this.updateOthers();
 
     // Check which keys are held down right now.
     const left = this.cursors.left.isDown || this.keys.A.isDown;
@@ -268,6 +298,7 @@ export class BootScene extends Phaser.Scene {
       body.setVelocity(0, 0);
       this.player.anims.stop();
       this.player.setFrame(frameFor(this.facing, 0));
+      this.sendPosition(false); // tell the server we stopped
       return;
     }
 
@@ -285,5 +316,87 @@ export class BootScene extends Phaser.Scene {
 
     // Play the walking animation for that direction.
     this.player.anims.play(`walk-${this.facing}`, true);
+
+    // Tell the server where we are, so everyone else sees us move.
+    this.sendPosition(true);
+  }
+
+  // Joins the city room and keeps the other players' pictures in step with the server.
+  private async connect() {
+    try {
+      const { room, callbacks } = await joinCity("Guest");
+      this.room = room;
+
+      // Runs once for every player in the room, now and whenever someone new joins.
+      callbacks.onAdd("players", (value: unknown, key: unknown) => {
+        // The library hands us plain unknown values, so we say what they really are:
+        // the player's shared data, and the player's session id.
+        const net = value as NetPlayer;
+        const sessionId = key as string;
+
+        // The list includes us. We already draw ourselves, so skip our own entry.
+        if (sessionId === room.sessionId) return;
+
+        // Pick a tint for this player from their id, so they keep the same colour.
+        let hash = 0;
+        for (const char of sessionId) hash += char.charCodeAt(0);
+        const tint = REMOTE_TINTS[hash % REMOTE_TINTS.length];
+
+        // Draw them at the position the server gave us.
+        const sprite = this.add.sprite(net.x, net.y, "people", frameFor(net.facing as Dir, 0));
+        sprite.setDepth(9); // just under our own character
+        sprite.setTint(tint);
+        this.others.set(sessionId, { sprite, net });
+      });
+
+      // Runs when someone leaves: remove their picture.
+      callbacks.onRemove("players", (_value: unknown, key: unknown) => {
+        const sessionId = key as string;
+        this.others.get(sessionId)?.sprite.destroy();
+        this.others.delete(sessionId);
+      });
+    } catch (error) {
+      // No server, no problem. Keep playing alone.
+      console.warn("Could not join the city server. Playing offline.", error);
+    }
+  }
+
+  // Tells the server our position. While walking it sends about 10 times a second.
+  // When we stop it sends once straight away so everyone sees us stand still.
+  private sendPosition(moving: boolean) {
+    if (!this.room) return;
+
+    const now = this.time.now;
+    const justStopped = !moving && this.wasMoving;
+    const timeToSend = moving && now - this.lastSent >= SEND_EVERY_MS;
+
+    if (justStopped || timeToSend) {
+      this.room.send("move", {
+        x: this.player.x,
+        y: this.player.y,
+        facing: this.facing,
+        moving,
+      });
+      this.lastSent = now;
+    }
+    this.wasMoving = moving;
+  }
+
+  // Slides each other player's picture toward their latest position from the server.
+  private updateOthers() {
+    this.others.forEach(({ sprite, net }) => {
+      // Move a quarter of the remaining distance each frame, for smooth gliding.
+      sprite.x += (net.x - sprite.x) * 0.25;
+      sprite.y += (net.y - sprite.y) * 0.25;
+
+      // Walk or stand, facing the way the server says.
+      const facing = net.facing as Dir;
+      if (net.moving) {
+        sprite.anims.play(`walk-${facing}`, true);
+      } else {
+        sprite.anims.stop();
+        sprite.setFrame(frameFor(facing, 0));
+      }
+    });
   }
 }
