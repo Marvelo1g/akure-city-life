@@ -40,6 +40,10 @@ const REMOTE_TINTS = [0xffd27f, 0x9fd3ff, 0xffa8a8, 0xb7f0b1, 0xe0b3ff, 0xfff1a8
 // How often (in milliseconds) we tell the server where we are while walking.
 const SEND_EVERY_MS = 100;
 
+// If another player is further than this many pixels from where the server says
+// they are (for example after a bad connection), jump them there instead of gliding.
+const SNAP_DISTANCE = 48;
+
 // How many pixels above a character's middle the name tag sits.
 const LABEL_OFFSET = 9;
 
@@ -258,14 +262,15 @@ export class BootScene extends Phaser.Scene {
   }
 
   // update() runs about 60 times every second. It handles movement.
-  update() {
+  // update() receives the time since the last frame in milliseconds (delta).
+  update(_time: number, delta: number) {
     if (!this.player) return; // nothing to move if create() stopped early
 
     // Let the route finder do a little work each frame.
     this.finder.calculate();
 
     // Move the other players' pictures toward where the server says they are.
-    this.updateOthers();
+    this.updateOthers(delta);
 
     // Check which keys are held down right now.
     const left = this.cursors.left.isDown || this.keys.A.isDown;
@@ -363,6 +368,15 @@ export class BootScene extends Phaser.Scene {
         this.others.set(sessionId, { sprite, net, label });
       });
 
+      // If our connection drops, clear the other players and carry on alone.
+      room.onLeave((code: number) => {
+        console.warn("Disconnected from the city server. Code:", code);
+        this.handleDisconnect();
+      });
+      room.onError((code: number, message?: string) => {
+        console.warn("City server error:", code, message);
+      });
+
       // Runs when someone leaves: remove their picture.
       callbacks.onRemove("players", (_value: unknown, key: unknown) => {
         const sessionId = key as string;
@@ -398,6 +412,18 @@ export class BootScene extends Phaser.Scene {
     this.wasMoving = moving;
   }
 
+  // Removes every other player and our name tag, used when the connection is lost.
+  private handleDisconnect() {
+    this.others.forEach(({ sprite, label }) => {
+      sprite.destroy();
+      label.destroy();
+    });
+    this.others.clear();
+    this.myLabel?.destroy();
+    this.myLabel = undefined;
+    this.room = undefined; // sendPosition() does nothing without a room
+  }
+
   // Makes a small name tag. It is drawn at a high resolution so it stays sharp when zoomed in.
   private makeLabel(text: string): Phaser.GameObjects.Text {
     const label = this.add.text(0, 0, text, {
@@ -415,14 +441,24 @@ export class BootScene extends Phaser.Scene {
 
   // Slides each other player's picture toward their latest position from the server,
   // and keeps every name tag (ours too) above its character.
-  private updateOthers() {
+  private updateOthers(delta: number) {
     // Our own name tag follows our own character.
     this.myLabel?.setPosition(this.player.x, this.player.y - LABEL_OFFSET);
 
+    // How much of the gap to close this frame. It depends on the time passed, not the
+    // frame count, so gliding looks the same on a slow phone and a fast laptop.
+    const smoothing = 1 - Math.exp(-delta / 75);
+
     this.others.forEach(({ sprite, net, label }) => {
-      // Move a quarter of the remaining distance each frame, for smooth gliding.
-      sprite.x += (net.x - sprite.x) * 0.25;
-      sprite.y += (net.y - sprite.y) * 0.25;
+      const gap = Math.hypot(net.x - sprite.x, net.y - sprite.y);
+      if (gap > SNAP_DISTANCE) {
+        // Too far to glide, so jump straight there.
+        sprite.setPosition(net.x, net.y);
+      } else {
+        // Otherwise glide a fraction of the way each frame.
+        sprite.x += (net.x - sprite.x) * smoothing;
+        sprite.y += (net.y - sprite.y) * smoothing;
+      }
 
       // Keep their name tag just above their head.
       label.setPosition(sprite.x, sprite.y - LABEL_OFFSET);
