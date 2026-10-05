@@ -30,14 +30,44 @@ function serverUrl(): string | null {
   return null;
 }
 
+// The key we use to remember the name for this browser tab.
+const NAME_KEY = "acl-name";
+
+// Finds out what name this player wants to use.
+// This is temporary. Real names come with the character creator in Week 4.
+function pickName(): string {
+  // 1. A name in the address, like localhost:3000/?name=Tolu. Handy for testing with two tabs.
+  const fromUrl = new URLSearchParams(window.location.search).get("name");
+  if (fromUrl) return fromUrl;
+
+  // 2. A name we already asked for in this tab.
+  try {
+    const saved = window.sessionStorage.getItem(NAME_KEY);
+    if (saved) return saved;
+  } catch {
+    // Some browsers block storage. That is fine, we just ask again.
+  }
+
+  // 3. Ask the player. If they leave it empty, the server gives them a Guest name.
+  const typed = window.prompt("What should we call you in Akure?") ?? "";
+  const name = typed.trim().slice(0, 16);
+  try {
+    window.sessionStorage.setItem(NAME_KEY, name);
+  } catch {
+    // Ignore: the name still works for this visit.
+  }
+  return name;
+}
+
 // Connects to the server and joins the "city" room.
 // Returns the room (to send messages) and callbacks (to hear about changes).
-export async function joinCity(name: string) {
+export async function joinCity() {
+  // Check for a server first, so we never ask for a name when there is nowhere to join.
   const url = serverUrl();
   if (!url) throw new Error("No game server configured");
 
   const client = new Client(url);
-  const room = await client.joinOrCreate("city", { name });
+  const room = await client.joinOrCreate("city", { name: pickName() });
   const callbacks = Callbacks.get(room);
   return { room, callbacks };
 }

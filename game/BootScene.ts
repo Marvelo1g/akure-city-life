@@ -40,6 +40,9 @@ const REMOTE_TINTS = [0xffd27f, 0x9fd3ff, 0xffa8a8, 0xb7f0b1, 0xe0b3ff, 0xfff1a8
 // How often (in milliseconds) we tell the server where we are while walking.
 const SEND_EVERY_MS = 100;
 
+// How many pixels above a character's middle the name tag sits.
+const LABEL_OFFSET = 9;
+
 // The four directions the character can face.
 type Dir = "left" | "down" | "up" | "right";
 
@@ -69,7 +72,13 @@ export class BootScene extends Phaser.Scene {
 
   // The other players in the city. For each one we keep the picture we draw
   // and the live data the server sends about them (position, direction, walking).
-  private others = new Map<string, { sprite: Phaser.GameObjects.Sprite; net: NetPlayer }>();
+  private others = new Map<
+    string,
+    { sprite: Phaser.GameObjects.Sprite; net: NetPlayer; label: Phaser.GameObjects.Text }
+  >();
+
+  // The name tag above our own character.
+  private myLabel?: Phaser.GameObjects.Text;
 
   // Our connection to the city room on the server. Empty until we have connected.
   private room?: CityRoom;
@@ -324,7 +333,7 @@ export class BootScene extends Phaser.Scene {
   // Joins the city room and keeps the other players' pictures in step with the server.
   private async connect() {
     try {
-      const { room, callbacks } = await joinCity("Guest");
+      const { room, callbacks } = await joinCity();
       this.room = room;
 
       // Runs once for every player in the room, now and whenever someone new joins.
@@ -334,8 +343,11 @@ export class BootScene extends Phaser.Scene {
         const net = value as NetPlayer;
         const sessionId = key as string;
 
-        // The list includes us. We already draw ourselves, so skip our own entry.
-        if (sessionId === room.sessionId) return;
+        // The list includes us. We already draw ourselves, so we only add our name tag.
+        if (sessionId === room.sessionId) {
+          this.myLabel = this.makeLabel(net.name);
+          return;
+        }
 
         // Pick a tint for this player from their id, so they keep the same colour.
         let hash = 0;
@@ -346,13 +358,17 @@ export class BootScene extends Phaser.Scene {
         const sprite = this.add.sprite(net.x, net.y, "people", frameFor(net.facing as Dir, 0));
         sprite.setDepth(9); // just under our own character
         sprite.setTint(tint);
-        this.others.set(sessionId, { sprite, net });
+        // Put their name above their head.
+        const label = this.makeLabel(net.name);
+        this.others.set(sessionId, { sprite, net, label });
       });
 
       // Runs when someone leaves: remove their picture.
       callbacks.onRemove("players", (_value: unknown, key: unknown) => {
         const sessionId = key as string;
-        this.others.get(sessionId)?.sprite.destroy();
+        const other = this.others.get(sessionId);
+        other?.sprite.destroy();
+        other?.label.destroy();
         this.others.delete(sessionId);
       });
     } catch (error) {
@@ -382,12 +398,34 @@ export class BootScene extends Phaser.Scene {
     this.wasMoving = moving;
   }
 
-  // Slides each other player's picture toward their latest position from the server.
+  // Makes a small name tag. It is drawn at a high resolution so it stays sharp when zoomed in.
+  private makeLabel(text: string): Phaser.GameObjects.Text {
+    const label = this.add.text(0, 0, text, {
+      fontFamily: "monospace",
+      fontSize: "8px",
+      color: "#ffffff",
+      stroke: "#000000",
+      strokeThickness: 2,
+    });
+    label.setOrigin(0.5, 1); // centre it, with its bottom edge at the position we give
+    label.setDepth(11); // above all the characters
+    label.setResolution(4);
+    return label;
+  }
+
+  // Slides each other player's picture toward their latest position from the server,
+  // and keeps every name tag (ours too) above its character.
   private updateOthers() {
-    this.others.forEach(({ sprite, net }) => {
+    // Our own name tag follows our own character.
+    this.myLabel?.setPosition(this.player.x, this.player.y - LABEL_OFFSET);
+
+    this.others.forEach(({ sprite, net, label }) => {
       // Move a quarter of the remaining distance each frame, for smooth gliding.
       sprite.x += (net.x - sprite.x) * 0.25;
       sprite.y += (net.y - sprite.y) * 0.25;
+
+      // Keep their name tag just above their head.
+      label.setPosition(sprite.x, sprite.y - LABEL_OFFSET);
 
       // Walk or stand, facing the way the server says.
       const facing = net.facing as Dir;
