@@ -84,6 +84,9 @@ export class BootScene extends Phaser.Scene {
   // The name tag above our own character.
   private myLabel?: Phaser.GameObjects.Text;
 
+  // A small message in the corner that tells the player what the connection is doing.
+  private status?: HTMLDivElement;
+
   // Our connection to the city room on the server. Empty until we have connected.
   private room?: CityRoom;
 
@@ -258,6 +261,7 @@ export class BootScene extends Phaser.Scene {
     // Leave the room politely when this scene ends.
     this.events.once("shutdown", () => {
       void this.room?.leave();
+      this.status?.remove();
     });
   }
 
@@ -338,8 +342,13 @@ export class BootScene extends Phaser.Scene {
   // Joins the city room and keeps the other players' pictures in step with the server.
   private async connect() {
     try {
-      const { room, callbacks } = await joinCity();
+      this.setStatus("Connecting to the city...");
+      const { room, callbacks } = await joinCity((text) => this.setStatus(text));
       this.room = room;
+
+      // Shows how many people are in the city, counting us.
+      const showOnline = () => this.setStatus(`Online: ${this.others.size + 1}`);
+      showOnline();
 
       // Runs once for every player in the room, now and whenever someone new joins.
       callbacks.onAdd("players", (value: unknown, key: unknown) => {
@@ -366,12 +375,14 @@ export class BootScene extends Phaser.Scene {
         // Put their name above their head.
         const label = this.makeLabel(net.name);
         this.others.set(sessionId, { sprite, net, label });
+        showOnline();
       });
 
       // If our connection drops, clear the other players and carry on alone.
       room.onLeave((code: number) => {
         console.warn("Disconnected from the city server. Code:", code);
         this.handleDisconnect();
+        this.setStatus("Disconnected: playing alone");
       });
       room.onError((code: number, message?: string) => {
         console.warn("City server error:", code, message);
@@ -384,10 +395,12 @@ export class BootScene extends Phaser.Scene {
         other?.sprite.destroy();
         other?.label.destroy();
         this.others.delete(sessionId);
+        showOnline();
       });
     } catch (error) {
       // No server, no problem. Keep playing alone.
       console.warn("Could not join the city server. Playing offline.", error);
+      this.setStatus("Offline: playing alone");
     }
   }
 
@@ -410,6 +423,21 @@ export class BootScene extends Phaser.Scene {
       this.lastSent = now;
     }
     this.wasMoving = moving;
+  }
+
+  // Shows a short message in the top left corner of the game.
+  // It is a normal web page element, so it stays sharp and ignores the camera zoom.
+  private setStatus(text: string) {
+    if (!this.status) {
+      const box = document.createElement("div");
+      box.style.cssText =
+        "position:absolute;top:8px;left:8px;padding:2px 10px;border-radius:9999px;" +
+        "background:rgba(0,0,0,.55);color:#fff;font:12px monospace;pointer-events:none;z-index:5";
+      // Put it next to the game canvas, inside the same box on the page.
+      this.game.canvas.parentElement?.appendChild(box);
+      this.status = box;
+    }
+    this.status.textContent = text;
   }
 
   // Removes every other player and our name tag, used when the connection is lost.

@@ -62,6 +62,8 @@ function pickName(): string {
 // How many times we try to join, and how long we wait between tries.
 // A free hosted server falls asleep when nobody plays, and can take up to a minute to wake.
 const MAX_TRIES = 8;
+// How many times we check that a sleeping server has woken up before joining.
+const MAX_WAKE_TRIES = 15;
 const WAIT_MS = 5000;
 
 // Waits for a number of milliseconds.
@@ -69,21 +71,48 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Keeps asking the server's /health page until it answers "ok".
+// A sleeping free server answers with a "waking up" page instead, which this check
+// treats as "not ready yet". That way we only try to join once the server is really awake.
+async function waitForServer(url: string): Promise<void> {
+  for (let attempt = 1; attempt <= MAX_WAKE_TRIES; attempt++) {
+    try {
+      const response = await fetch(`${url}/health`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(10000), // give up on one check after 10 seconds
+      });
+      if ((await response.text()).trim() === "ok") return; // the server is awake
+    } catch {
+      // No answer yet, or the sleeping server's page. Wait and ask again.
+    }
+    console.warn(`Waiting for the city server to wake up (check ${attempt} of ${MAX_WAKE_TRIES})...`);
+    await sleep(WAIT_MS);
+  }
+}
+
 // Connects to the server and joins the "city" room.
 // Returns the room (to send messages) and callbacks (to hear about changes).
-export async function joinCity() {
+export async function joinCity(onStatus?: (text: string) => void) {
   // Check for a server first, so we never ask for a name when there is nowhere to join.
   const url = serverUrl();
   if (!url) throw new Error("No game server configured");
 
   // Ask for the name once, before the tries, so we do not ask again each time.
   const name = pickName();
+  // Make sure the server is awake first.
+  console.info("Connecting to the city server at", url);
+  onStatus?.("Waking the city server. This can take a minute...");
+  await waitForServer(url);
+
+  onStatus?.("Joining the city...");
+
   const client = new Client(url);
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
     try {
       const room = await client.joinOrCreate("city", { name });
+      console.info("Joined the city as", room.sessionId);
       const callbacks = Callbacks.get(room);
       return { room, callbacks };
     } catch (error) {
