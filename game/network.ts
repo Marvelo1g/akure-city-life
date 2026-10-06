@@ -59,6 +59,16 @@ function pickName(): string {
   return name;
 }
 
+// How many times we try to join, and how long we wait between tries.
+// A free hosted server falls asleep when nobody plays, and can take up to a minute to wake.
+const MAX_TRIES = 8;
+const WAIT_MS = 5000;
+
+// Waits for a number of milliseconds.
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // Connects to the server and joins the "city" room.
 // Returns the room (to send messages) and callbacks (to hear about changes).
 export async function joinCity() {
@@ -66,10 +76,25 @@ export async function joinCity() {
   const url = serverUrl();
   if (!url) throw new Error("No game server configured");
 
+  // Ask for the name once, before the tries, so we do not ask again each time.
+  const name = pickName();
   const client = new Client(url);
-  const room = await client.joinOrCreate("city", { name: pickName() });
-  const callbacks = Callbacks.get(room);
-  return { room, callbacks };
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
+    try {
+      const room = await client.joinOrCreate("city", { name });
+      const callbacks = Callbacks.get(room);
+      return { room, callbacks };
+    } catch (error) {
+      // The server may still be waking up. Wait a little and try again.
+      lastError = error;
+      console.warn(`Could not join the city (try ${attempt} of ${MAX_TRIES}). Trying again...`);
+      await sleep(WAIT_MS);
+    }
+  }
+  // We tried everything. The game carries on alone.
+  throw lastError;
 }
 
 // The type of the room object, so other files can store it.
