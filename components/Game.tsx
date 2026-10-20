@@ -1,9 +1,10 @@
 "use client";
 
 // components/Game.tsx
-// Starts the Phaser game inside the page.
+// Starts the Phaser game inside the page and shows the chat box on top of it.
 
 import { useEffect, useRef } from "react";
+import Chat from "@/components/Chat";
 
 export default function Game() {
   // The empty box Phaser draws its canvas into.
@@ -47,6 +48,8 @@ export default function Game() {
   return (
     <div className="relative h-dvh w-full touch-none overflow-hidden">
       <div ref={holder} className="h-full w-full" />
+      {/* The chat box, drawn over the bottom of the game. */}
+      <Chat />
     </div>
   );
 }

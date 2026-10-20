@@ -7,6 +7,8 @@ import Phaser from "phaser";
 import * as EasyStar from "easystarjs";
 // Our connection to the game server, and the shape of a player's shared data.
 import { joinCity, type CityRoom, type NetPlayer } from "@/game/network";
+// Lets the chat box on the page and the game talk to each other.
+import { incomingChat, outgoingChat, typingChannel, type ChatMessage } from "@/game/bridge";
 
 // How fast the character walks, in pixels per second.
 const SPEED = 70;
@@ -83,6 +85,12 @@ export class BootScene extends Phaser.Scene {
 
   // The name tag above our own character.
   private myLabel?: Phaser.GameObjects.Text;
+
+  // The speech bubbles currently showing, one per player, by session id.
+  private bubbles = new Map<string, Phaser.GameObjects.Text>();
+
+  // Functions that stop listening to the chat box, run when the scene ends.
+  private cleanups: Array<() => void> = [];
 
   // A small message in the corner that tells the player what the connection is doing.
   private status?: HTMLDivElement;
@@ -253,8 +261,19 @@ export class BootScene extends Phaser.Scene {
 
     // Set up the keyboard: arrow keys and W, A, S, D.
     const keyboard = this.input.keyboard!;
+    // Let the browser keep the keys, so letters can still be typed in the chat box.
+    keyboard.disableGlobalCapture();
     this.cursors = keyboard.createCursorKeys();
     this.keys = keyboard.addKeys("W,A,S,D") as typeof this.keys;
+
+    // While the player types in the chat box, switch the game keyboard off,
+    // so W, A, S and D do not walk the character while they write a message.
+    this.cleanups.push(
+      typingChannel.on((typing) => {
+        keyboard.enabled = !typing;
+        if (typing) keyboard.resetKeys();
+      }),
+    );
 
     // Join the city on the server. If the server is off, the game still works alone.
     void this.connect();
@@ -262,6 +281,7 @@ export class BootScene extends Phaser.Scene {
     this.events.once("shutdown", () => {
       void this.room?.leave();
       this.status?.remove();
+      this.cleanups.forEach((stop) => stop());
     });
   }
 
@@ -275,6 +295,7 @@ export class BootScene extends Phaser.Scene {
 
     // Move the other players' pictures toward where the server says they are.
     this.updateOthers(delta);
+    this.positionBubbles();
 
     // Check which keys are held down right now.
     const left = this.cursors.left.isDown || this.keys.A.isDown;
@@ -350,6 +371,15 @@ export class BootScene extends Phaser.Scene {
       const showOnline = () => this.setStatus(`Online: ${this.others.size + 1}`);
       showOnline();
 
+      // Chat: send what the player types in the chat box to the server.
+      this.cleanups.push(outgoingChat.on((text) => room.send("chat", { text })));
+
+      // Chat: when the server sends a message, show it in the chat box and as a bubble.
+      room.onMessage("chat", (message: ChatMessage) => {
+        incomingChat.emit(message);
+        this.showBubble(message.id, message.text);
+      });
+
       // Runs once for every player in the room, now and whenever someone new joins.
       callbacks.onAdd("players", (value: unknown, key: unknown) => {
         // The library hands us plain unknown values, so we say what they really are:
@@ -394,6 +424,8 @@ export class BootScene extends Phaser.Scene {
         const other = this.others.get(sessionId);
         other?.sprite.destroy();
         other?.label.destroy();
+        this.bubbles.get(sessionId)?.destroy();
+        this.bubbles.delete(sessionId);
         this.others.delete(sessionId);
         showOnline();
       });
@@ -425,6 +457,44 @@ export class BootScene extends Phaser.Scene {
     this.wasMoving = moving;
   }
 
+  // Shows a speech bubble above a player for a few seconds.
+  private showBubble(id: string, text: string) {
+    // A new message replaces that player's old bubble.
+    this.bubbles.get(id)?.destroy();
+
+    const bubble = this.add.text(0, 0, text, {
+      fontFamily: "monospace",
+      fontSize: "7px",
+      color: "#10233f",
+      backgroundColor: "#ffffff",
+      padding: { x: 3, y: 2 },
+      wordWrap: { width: 90 }, // long messages wrap onto more lines
+      align: "center",
+    });
+    bubble.setOrigin(0.5, 1); // centred, with the bottom edge at the position we give
+    bubble.setDepth(12); // above name tags and characters
+    bubble.setResolution(4); // stays sharp when zoomed in
+    this.bubbles.set(id, bubble);
+    this.positionBubbles();
+
+    // Remove it after 5 seconds, unless a newer bubble has taken its place.
+    this.time.delayedCall(5000, () => {
+      if (this.bubbles.get(id) === bubble) {
+        bubble.destroy();
+        this.bubbles.delete(id);
+      }
+    });
+  }
+
+  // Keeps every speech bubble above its speaker, even while they walk.
+  private positionBubbles() {
+    this.bubbles.forEach((bubble, id) => {
+      // The speaker is either us or one of the other players.
+      const speaker = id === this.room?.sessionId ? this.player : this.others.get(id)?.sprite;
+      if (speaker) bubble.setPosition(speaker.x, speaker.y - LABEL_OFFSET - 12);
+    });
+  }
+
   // Shows a short message in the top left corner of the game.
   // It is a normal web page element, so it stays sharp and ignores the camera zoom.
   private setStatus(text: string) {
@@ -447,6 +517,8 @@ export class BootScene extends Phaser.Scene {
       label.destroy();
     });
     this.others.clear();
+    this.bubbles.forEach((bubble) => bubble.destroy());
+    this.bubbles.clear();
     this.myLabel?.destroy();
     this.myLabel = undefined;
     this.room = undefined; // sendPosition() does nothing without a room
