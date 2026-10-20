@@ -33,4 +33,4 @@ export const incomingChat = createChannel<ChatMessage>();
 
 // The page tells the game when the player starts or stops typing,
 // so the keys they type do not also walk the character.
-export const typingChannel = createChannel<boolean>();s
+export const typingChannel = createChannel<boolean>();
