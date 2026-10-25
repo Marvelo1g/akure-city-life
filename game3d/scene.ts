@@ -5,6 +5,7 @@
 
 import * as THREE from "three";
 import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { SkinName } from "@/game3d/skins";
 
 // ---- Settings you can change ----
@@ -20,7 +21,7 @@ const ARRIVE_DISTANCE = 0.12;
 // The ground is 80 by 80 units, so the character stays within 38 of the middle.
 const WORLD_HALF = 38;
 // Where the camera sits compared to the character: above and behind.
-const CAMERA_OFFSET = new THREE.Vector3(0, 9, 9);
+const CAMERA_OFFSET = new THREE.Vector3(0, 12, 10);
 // How quickly the camera catches up with the character.
 const CAMERA_FOLLOW_SPEED = 5;
 // Shadows look great but cost speed on cheap phones. Switch off if the FPS is low.
@@ -33,17 +34,54 @@ const CHARACTER_URL = "/assets/3d/character/characterMedium.fbx";
 const IDLE_URL = "/assets/3d/character/idle.fbx";
 const RUN_URL = "/assets/3d/character/run.fbx";
 
-// Placeholder buildings, until we place real ones from the building kits.
-// Each one: x, z (position), width, depth, height, colour.
-const BUILDINGS: Array<[number, number, number, number, number, number]> = [
-  [-10, -9, 6, 5, 4, 0xd9a066],
-  [-3, -12, 5, 4, 6, 0xc86f5d],
-  [6, -10, 7, 5, 3.5, 0xe8d28a],
-  [14, -8, 5, 6, 5, 0x8fb8c9],
-  [-14, 4, 5, 7, 4.5, 0xb99ad1],
-  [12, 6, 6, 6, 4, 0xd9a066],
-  [-6, 11, 7, 4, 3.5, 0x9ccf9c],
-  [5, 14, 5, 5, 7, 0xc86f5d],
+// ---- The city: real 3D models from the Kenney City Kit (Suburban) ----
+
+// Where the model files live. Each .glb needs the Textures folder next to it.
+const CITY_FOLDER = "/assets/3d/city/suburban/";
+// The kit models are tiny (a house is only about 1.3 units wide), so we scale them up.
+const BUILDING_SCALE = 8;
+// If the doors face away from the road, change this to Math.PI (half a turn).
+const FRONT_ROTATION = 0;
+
+// One thing to put in the world: which model, where, and which way it faces.
+type Placement = { model: string; x: number; z: number; rotation: number };
+
+// The house models we use, one after another.
+const HOUSES = [
+  "building-type-a",
+  "building-type-b",
+  "building-type-c",
+  "building-type-d",
+  "building-type-e",
+  "building-type-f",
+  "building-type-g",
+  "building-type-h",
+];
+
+// A row of houses along one side of the road. "shift" starts the list at a different house.
+function houseRow(z: number, rotation: number, shift: number): Placement[] {
+  const xs = [-30, -19, -8, 8, 19, 30];
+  return xs.map((x, index) => ({
+    model: HOUSES[(index + shift) % HOUSES.length],
+    x,
+    z,
+    rotation,
+  }));
+}
+
+// Everything we place. The north row faces south, and the south row faces north.
+const PLACEMENTS: Placement[] = [
+  ...houseRow(-9, 0, 0),
+  ...houseRow(9, Math.PI, 3),
+  // Trees dotted around the edges.
+  { model: "tree-large", x: -24, z: -18, rotation: 0 },
+  { model: "tree-large", x: -13, z: -18, rotation: 0 },
+  { model: "tree-large", x: 13, z: -18, rotation: 0 },
+  { model: "tree-large", x: 24, z: -18, rotation: 0 },
+  { model: "tree-small", x: -24, z: 18, rotation: 0 },
+  { model: "tree-small", x: -13, z: 18, rotation: 0 },
+  { model: "tree-small", x: 13, z: 18, rotation: 0 },
+  { model: "tree-small", x: 24, z: 18, rotation: 0 },
 ];
 
 // What the page gives us, so it can show messages and the speed.
@@ -135,25 +173,8 @@ export function startScene(container: HTMLElement, options: Options) {
   roadDown.receiveShadow = true;
   scene.add(roadDown);
 
-  // ---- Placeholder buildings, plus their walls for bumping into ----
+  // ---- Walls the character cannot walk through. Filled in as the buildings load. ----
   const walls: Wall[] = [];
-  for (const [x, z, width, depth, height, colour] of BUILDINGS) {
-    const building = new THREE.Mesh(
-      new THREE.BoxGeometry(width, height, depth),
-      new THREE.MeshLambertMaterial({ color: colour }),
-    );
-    building.position.set(x, height / 2, z);
-    building.castShadow = true;
-    building.receiveShadow = true;
-    scene.add(building);
-    // The wall is the building's footprint, made a little bigger to fit the character's body.
-    walls.push({
-      minX: x - width / 2 - BODY_RADIUS,
-      maxX: x + width / 2 + BODY_RADIUS,
-      minZ: z - depth / 2 - BODY_RADIUS,
-      maxZ: z + depth / 2 + BODY_RADIUS,
-    });
-  }
 
   // If the character is inside a wall, push it out the nearest side.
   function pushOutOfWalls(position: THREE.Vector3) {
@@ -261,6 +282,65 @@ export function startScene(container: HTMLElement, options: Options) {
     } catch (error) {
       console.error("Could not load the 3D character", error);
       options.onStatus("Could not load the character. Check the files in public/assets/3d.");
+    }
+  })();
+
+  // ---- Loading the city models ----
+  const gltfLoader = new GLTFLoader();
+  // Each model file is loaded once, then copied for every place we use it.
+  const modelCache = new Map<string, Promise<THREE.Group>>();
+
+  function loadModel(name: string): Promise<THREE.Group> {
+    let promise = modelCache.get(name);
+    if (!promise) {
+      promise = gltfLoader.loadAsync(`${CITY_FOLDER}${name}.glb`).then((gltf) => gltf.scene);
+      modelCache.set(name, promise);
+    }
+    return promise;
+  }
+
+  (async () => {
+    try {
+      // allSettled lets the models that load show up, even if one file is missing.
+      const results = await Promise.allSettled(
+        PLACEMENTS.map(async (placement) => {
+          const source = await loadModel(placement.model);
+          if (disposed) return;
+
+          // A copy that shares the same shapes and colours, so memory stays small.
+          const copy = source.clone(true);
+          copy.scale.setScalar(BUILDING_SCALE);
+          copy.position.set(placement.x, 0, placement.z);
+          copy.rotation.y = placement.rotation + FRONT_ROTATION;
+          copy.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+              child.castShadow = true;
+              child.receiveShadow = true;
+            }
+          });
+          scene.add(copy);
+
+          // The wall is the footprint of the placed model, made a little bigger for the character's body.
+          copy.updateMatrixWorld(true);
+          const box = new THREE.Box3().setFromObject(copy);
+          walls.push({
+            minX: box.min.x - BODY_RADIUS,
+            maxX: box.max.x + BODY_RADIUS,
+            minZ: box.min.z - BODY_RADIUS,
+            maxZ: box.max.z + BODY_RADIUS,
+          });
+        }),
+      );
+
+      // Tell the player (and the console) if any model failed to load.
+      const failed = results.filter((result) => result.status === "rejected");
+      if (failed.length > 0) {
+        console.error("Some city models could not load", failed);
+        options.onStatus(`${failed.length} city models could not load. Check public/assets/3d/city.`);
+      }
+    } catch (error) {
+      console.error("Could not load the city models", error);
+      options.onStatus("Could not load the buildings. Check public/assets/3d/city.");
     }
   })();
 
