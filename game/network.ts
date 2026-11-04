@@ -92,7 +92,11 @@ async function waitForServer(url: string): Promise<void> {
 
 // Connects to the server and joins the "city" room.
 // Returns the room (to send messages) and callbacks (to hear about changes).
-export async function joinCity(onStatus?: (text: string) => void) {
+// "settings" lets the 3D game ask for a different room and say which skin it wears.
+export async function joinCity(
+  onStatus?: (text: string) => void,
+  settings?: { room?: string; skin?: string },
+) {
   // Check for a server first, so we never ask for a name when there is nowhere to join.
   const url = serverUrl();
   if (!url) throw new Error("No game server configured");
@@ -111,7 +115,7 @@ export async function joinCity(onStatus?: (text: string) => void) {
   let lastError: unknown;
   for (let attempt = 1; attempt <= MAX_TRIES; attempt++) {
     try {
-      const room = await client.joinOrCreate("city", { name });
+      const room = await client.joinOrCreate(settings?.room ?? "city", { name, skin: settings?.skin });
       console.info("Joined the city as", room.sessionId);
       const callbacks = Callbacks.get(room);
       return { room, callbacks };
@@ -125,6 +129,17 @@ export async function joinCity(onStatus?: (text: string) => void) {
   // We tried everything. The game carries on alone.
   throw lastError;
 }
+
+// The information the server shares about each player in the 3D city.
+// It must match the Player3D definition in the server's City3DState.ts.
+export type NetPlayer3D = {
+  name: string;
+  skin: string;
+  x: number;
+  z: number;
+  rotation: number;
+  moving: boolean;
+};
 
 // The type of the room object, so other files can store it.
 export type CityRoom = Awaited<ReturnType<typeof joinCity>>["room"];

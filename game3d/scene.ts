@@ -6,7 +6,11 @@
 import * as THREE from "three";
 import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import * as SkeletonUtils from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { SkinName } from "@/game3d/skins";
+// Our connection to the game server, and the chat message shape.
+import { joinCity, type CityRoom, type NetPlayer3D } from "@/game/network";
+import { incomingChat, outgoingChat, type ChatMessage } from "@/game/bridge";
 
 // ---- Settings you can change ----
 
@@ -40,6 +44,9 @@ const RUN_URL = "/assets/3d/character/run.fbx";
 const CITY_FOLDER = "/assets/3d/city/suburban/";
 // The kit models are tiny (a house is only about 1.3 units wide), so we scale them up.
 const BUILDING_SCALE = 8;
+// Trees use their own smaller size, so they do not tower over the houses.
+// Try 4 for smaller trees or 6 for bigger ones.
+const TREE_SCALE = 5;
 // If the doors face away from the road, change this to Math.PI (half a turn).
 const FRONT_ROTATION = 0;
 
@@ -202,19 +209,38 @@ export function startScene(container: HTMLElement, options: Options) {
   camera.position.copy(player.position).add(CAMERA_OFFSET);
 
   // ---- The skin: the painted picture wrapped around the character ----
+  // Our connection to the city room. It stays empty until we have joined.
+  let room: CityRoom | undefined;
+
   const textureLoader = new THREE.TextureLoader();
   const skinMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
-  let skinTexture: THREE.Texture | null = null;
+  // Skin pictures we have already loaded, so each picture is only downloaded once.
+  const skinCache = new Map<string, THREE.Texture>();
+  // The skin we are wearing now.
+  let currentSkin: SkinName = "skaterMaleA";
 
-  function setSkin(name: SkinName) {
+  // Puts a skin picture onto a material. Used for us and for other players.
+  function applySkinTo(material: THREE.MeshLambertMaterial, name: string) {
+    const cached = skinCache.get(name);
+    if (cached) {
+      material.map = cached;
+      material.needsUpdate = true;
+      return;
+    }
     textureLoader.load(`/assets/3d/skins/${name}.png`, (texture) => {
       texture.colorSpace = THREE.SRGBColorSpace; // so colours look right
       texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-      skinTexture?.dispose(); // free the old picture from memory
-      skinTexture = texture;
-      skinMaterial.map = texture;
-      skinMaterial.needsUpdate = true;
+      skinCache.set(name, texture);
+      material.map = texture;
+      material.needsUpdate = true;
     });
+  }
+
+  // Changes our own skin, and tells the server so other players see it too.
+  function setSkin(name: SkinName) {
+    currentSkin = name;
+    applySkinTo(skinMaterial, name);
+    room?.send("skin", { skin: name });
   }
   setSkin("skaterMaleA");
 
@@ -235,6 +261,11 @@ export function startScene(container: HTMLElement, options: Options) {
   }
 
   // ---- Loading the character model and animations ----
+  // Kept so we can make copies of the character for other players.
+  let characterTemplate: THREE.Group | null = null;
+  let sharedIdleClip: THREE.AnimationClip | null = null;
+  let sharedRunClip: THREE.AnimationClip | null = null;
+
   let disposed = false;
   (async () => {
     try {
@@ -266,11 +297,14 @@ export function startScene(container: HTMLElement, options: Options) {
         }
       });
       player.add(model);
+      characterTemplate = model; // other players are copies of this
 
       // The animations live in separate files. We take the clip we need from each.
       const idleClip = idleFile.animations.find((clip) => clip.name.includes("Idle"));
       const runClip = runFile.animations.find((clip) => clip.name.includes("Run"));
       if (!idleClip || !runClip) throw new Error("Animation clips not found");
+      sharedIdleClip = idleClip;
+      sharedRunClip = runClip;
 
       mixer = new THREE.AnimationMixer(model);
       idleAction = mixer.clipAction(idleClip);
@@ -279,6 +313,9 @@ export function startScene(container: HTMLElement, options: Options) {
       idleAction.play();
 
       options.onStatus(""); // clear the loading message
+
+      // Now that the character is ready, join the city.
+      void connect();
     } catch (error) {
       console.error("Could not load the 3D character", error);
       options.onStatus("Could not load the character. Check the files in public/assets/3d.");
@@ -309,7 +346,8 @@ export function startScene(container: HTMLElement, options: Options) {
 
           // A copy that shares the same shapes and colours, so memory stays small.
           const copy = source.clone(true);
-          copy.scale.setScalar(BUILDING_SCALE);
+          // Trees get the smaller tree size, everything else the building size.
+          copy.scale.setScalar(placement.model.startsWith("tree") ? TREE_SCALE : BUILDING_SCALE);
           copy.position.set(placement.x, 0, placement.z);
           copy.rotation.y = placement.rotation + FRONT_ROTATION;
           copy.traverse((child) => {
@@ -446,6 +484,326 @@ export function startScene(container: HTMLElement, options: Options) {
     }
   }
 
+  // ---- Multiplayer: other players, name tags and speech bubbles ----
+
+  // Everything we keep for one other player.
+  type Remote = {
+    group: THREE.Group; // holds their model, name tag and speech bubble
+    mixer: THREE.AnimationMixer;
+    idle: THREE.AnimationAction;
+    run: THREE.AnimationAction;
+    moving: boolean; // what their animation is showing now
+    skin: string; // the skin they are wearing now
+    material: THREE.MeshLambertMaterial;
+    label: THREE.Sprite; // their name tag
+    net: NetPlayer3D; // the live data from the server
+  };
+
+  const remotes = new Map<string, Remote>(); // other players, by session id
+  const bubbles = new Map<string, { sprite: THREE.Sprite; expires: number }>(); // speech bubbles showing now
+  let myId = ""; // our own session id
+  let myLabel: THREE.Sprite | null = null; // our own name tag
+  let lastSent = 0; // when we last told the server where we are
+  let wasMoving = false;
+  const cleanups: Array<() => void> = []; // things to switch off when we shut down
+
+  // How many text picture pixels make one world unit. Bigger means smaller text in the world.
+  const TEXT_PIXELS_PER_UNIT = 60;
+
+  // How a piece of floating text should look.
+  type TextStyle = { fontSize: number; color: string; background: string | null; maxWidth: number };
+
+  // Makes a flat picture of some text that always faces the camera. We use it for name tags and bubbles.
+  function makeTextSprite(text: string, style: TextStyle): THREE.Sprite {
+    const scale = 2; // draw at double size so the text stays sharp
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Canvas is not available");
+
+    const font = `bold ${style.fontSize * scale}px sans-serif`;
+    context.font = font;
+
+    // Break the text into lines that fit the maximum width.
+    const maxPixels = style.maxWidth * scale;
+    const lines: string[] = [];
+    let line = "";
+    for (const word of text.split(" ")) {
+      const attempt = line ? `${line} ${word}` : word;
+      if (line && context.measureText(attempt).width > maxPixels) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = attempt;
+      }
+    }
+    if (line) lines.push(line);
+
+    // Work out how big the picture needs to be.
+    const padding = 8 * scale;
+    const lineHeight = style.fontSize * scale * 1.3;
+    const widest = Math.max(...lines.map((entry) => context.measureText(entry).width));
+    canvas.width = Math.ceil(widest + padding * 2);
+    canvas.height = Math.ceil(lines.length * lineHeight + padding * 2);
+
+    // Changing the size of a canvas clears its settings, so we set them again.
+    context.font = font;
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+
+    // A rounded box behind the text, for speech bubbles.
+    if (style.background) {
+      const width = canvas.width;
+      const height = canvas.height;
+      const radius = 10 * scale;
+      context.fillStyle = style.background;
+      context.beginPath();
+      context.moveTo(radius, 0);
+      context.arcTo(width, 0, width, height, radius);
+      context.arcTo(width, height, 0, height, radius);
+      context.arcTo(0, height, 0, 0, radius);
+      context.arcTo(0, 0, width, 0, radius);
+      context.closePath();
+      context.fill();
+    }
+
+    // Draw each line. Name tags get a dark outline so they can be read on any background.
+    lines.forEach((entry, index) => {
+      const y = padding + lineHeight * (index + 0.5);
+      if (!style.background) {
+        context.lineWidth = 4 * scale;
+        context.lineJoin = "round";
+        context.strokeStyle = "#000000";
+        context.strokeText(entry, canvas.width / 2, y);
+      }
+      context.fillStyle = style.color;
+      context.fillText(entry, canvas.width / 2, y);
+    });
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    // depthTest off means the text shows even when a building is in front.
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
+    sprite.scale.set(canvas.width / (scale * TEXT_PIXELS_PER_UNIT), canvas.height / (scale * TEXT_PIXELS_PER_UNIT), 1);
+    sprite.renderOrder = 10; // draw on top of everything else
+    return sprite;
+  }
+
+  // Frees a text sprite from memory and removes it from the world.
+  function disposeSprite(sprite: THREE.Sprite) {
+    sprite.material.map?.dispose();
+    sprite.material.dispose();
+    sprite.removeFromParent();
+  }
+
+  // A name tag, floating just above a character's head.
+  function makeNameTag(name: string): THREE.Sprite {
+    const tag = makeTextSprite(name, { fontSize: 22, color: "#ffffff", background: null, maxWidth: 200 });
+    tag.position.set(0, CHARACTER_HEIGHT + 0.3, 0);
+    return tag;
+  }
+
+  // Shows a speech bubble above a player for five seconds.
+  function showBubble(id: string, text: string) {
+    // The bubble belongs to either us or one of the other players.
+    const host = id === myId ? player : remotes.get(id)?.group;
+    if (!host) return;
+
+    // A new message replaces the old bubble.
+    const old = bubbles.get(id);
+    if (old) disposeSprite(old.sprite);
+
+    const sprite = makeTextSprite(text, {
+      fontSize: 20,
+      color: "#10233f",
+      background: "rgba(255,255,255,0.95)",
+      maxWidth: 220,
+    });
+    // Sit above the name tag.
+    sprite.position.set(0, CHARACTER_HEIGHT + 0.7 + sprite.scale.y / 2, 0);
+    host.add(sprite);
+    bubbles.set(id, { sprite, expires: performance.now() + 5000 });
+  }
+
+  // Removes speech bubbles whose time is up.
+  function updateBubbles() {
+    const now = performance.now();
+    bubbles.forEach((bubble, id) => {
+      if (now > bubble.expires) {
+        disposeSprite(bubble.sprite);
+        bubbles.delete(id);
+      }
+    });
+  }
+
+  // Makes a copy of our character for another player.
+  function addRemote(id: string, net: NetPlayer3D) {
+    if (!characterTemplate || !sharedIdleClip || !sharedRunClip) return;
+
+    // SkeletonUtils.clone copies a character that has bones, so it can still animate.
+    const copy = SkeletonUtils.clone(characterTemplate) as THREE.Group;
+    const material = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    applySkinTo(material, net.skin);
+    copy.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.material = material;
+        child.castShadow = true;
+        child.frustumCulled = false;
+      }
+    });
+
+    // The group is what we move around. It starts where the server says they are.
+    const group = new THREE.Group();
+    group.add(copy);
+    group.position.set(net.x, 0, net.z);
+    group.rotation.y = net.rotation;
+    scene.add(group);
+
+    // Their own animation player, so they can stand or run on their own schedule.
+    const mixer = new THREE.AnimationMixer(copy);
+    const idle = mixer.clipAction(sharedIdleClip);
+    const run = mixer.clipAction(sharedRunClip);
+    run.timeScale = 0.85;
+    idle.play();
+
+    const label = makeNameTag(net.name);
+    group.add(label);
+
+    remotes.set(id, { group, mixer, idle, run, moving: false, skin: net.skin, material, label, net });
+  }
+
+  // Removes another player from the world.
+  function removeRemote(id: string) {
+    const remote = remotes.get(id);
+    if (!remote) return;
+    const bubble = bubbles.get(id);
+    if (bubble) {
+      disposeSprite(bubble.sprite);
+      bubbles.delete(id);
+    }
+    disposeSprite(remote.label);
+    remote.mixer.stopAllAction();
+    remote.material.dispose();
+    scene.remove(remote.group);
+    remotes.delete(id);
+  }
+
+  // Moves every other player toward where the server says they are.
+  function updateRemotes(delta: number) {
+    // How much of the gap to close this frame. It depends on time, so it looks the same on any phone.
+    const smoothing = 1 - Math.exp(-delta / 0.075);
+
+    remotes.forEach((remote) => {
+      const { group, net } = remote;
+
+      // Glide toward their position, or jump if they are far away (after a bad connection).
+      const gap = Math.hypot(net.x - group.position.x, net.z - group.position.z);
+      if (gap > 6) {
+        group.position.set(net.x, 0, net.z);
+      } else {
+        group.position.x += (net.x - group.position.x) * smoothing;
+        group.position.z += (net.z - group.position.z) * smoothing;
+      }
+      group.rotation.y = turnToward(group.rotation.y, net.rotation, TURN_SPEED * delta);
+
+      // Switch between standing and running when they start or stop.
+      if (net.moving !== remote.moving) {
+        remote.moving = net.moving;
+        const from = net.moving ? remote.idle : remote.run;
+        const to = net.moving ? remote.run : remote.idle;
+        to.reset().fadeIn(0.2).play();
+        from.fadeOut(0.2);
+      }
+
+      // If they changed skin, change the picture on their model.
+      if (net.skin !== remote.skin) {
+        remote.skin = net.skin;
+        applySkinTo(remote.material, net.skin);
+      }
+
+      remote.mixer.update(delta);
+    });
+  }
+
+  // Tells the server where we are. While walking it sends about 10 times a second,
+  // and when we stop it sends once straight away.
+  function sendPosition() {
+    if (!room) return;
+    const now = performance.now();
+    const justStopped = !moving && wasMoving;
+    const timeToSend = moving && now - lastSent >= 100;
+    if (justStopped || timeToSend) {
+      room.send("move", {
+        x: player.position.x,
+        z: player.position.z,
+        rotation: player.rotation.y,
+        moving,
+      });
+      lastSent = now;
+    }
+    wasMoving = moving;
+  }
+
+  // Joins the city room and keeps the other players in step with the server.
+  async function connect() {
+    try {
+      options.onStatus("Connecting to the city...");
+      const joined = await joinCity((text) => options.onStatus(text), { room: "city3d", skin: currentSkin });
+      if (disposed) {
+        void joined.room.leave();
+        return;
+      }
+      room = joined.room;
+      myId = joined.room.sessionId;
+      const callbacks = joined.callbacks;
+
+      // Shows how many people are in the city, counting us.
+      const showOnline = () => options.onStatus(`Online: ${remotes.size + 1}`);
+      showOnline();
+
+      // Chat: send what the player types to the server.
+      cleanups.push(outgoingChat.on((text) => room?.send("chat", { text })));
+
+      // Chat: when the server sends a message, show it in the chat box and as a bubble.
+      joined.room.onMessage("chat", (message: ChatMessage) => {
+        incomingChat.emit(message);
+        showBubble(message.id, message.text);
+      });
+
+      // If the connection drops, clear the other players and carry on alone.
+      joined.room.onLeave((code: number) => {
+        console.warn("Disconnected from the city server. Code:", code);
+        Array.from(remotes.keys()).forEach(removeRemote);
+        room = undefined;
+        options.onStatus("Disconnected: playing alone");
+      });
+
+      // Runs once for every player in the room, now and whenever someone new joins.
+      callbacks.onAdd("players", (value: unknown, key: unknown) => {
+        const net = value as NetPlayer3D;
+        const id = key as string;
+
+        // The list includes us. We already have a body, so we only add our name tag.
+        if (id === myId) {
+          myLabel = makeNameTag(net.name);
+          player.add(myLabel);
+          return;
+        }
+        addRemote(id, net);
+        showOnline();
+      });
+
+      // Runs when someone leaves.
+      callbacks.onRemove("players", (_value: unknown, key: unknown) => {
+        removeRemote(key as string);
+        showOnline();
+      });
+    } catch (error) {
+      // No server, no problem. We keep playing alone.
+      console.warn("Could not join the city server. Playing offline.", error);
+      options.onStatus("Offline: playing alone");
+    }
+  }
+
   // ---- The main loop: runs once per frame ----
   const clock = new THREE.Clock();
   let frames = 0;
@@ -466,6 +824,9 @@ export function startScene(container: HTMLElement, options: Options) {
     }
 
     updatePlayer(delta);
+    sendPosition();
+    updateRemotes(delta);
+    updateBubbles();
     mixer?.update(delta);
     updateCamera(delta);
     updateMarker(delta);
@@ -479,7 +840,14 @@ export function startScene(container: HTMLElement, options: Options) {
     renderer.setAnimationLoop(null);
     renderer.domElement.removeEventListener("pointerdown", onPointerDown);
     resizeObserver.disconnect();
-    skinTexture?.dispose();
+    // Leave the city and remove everything to do with other players.
+    cleanups.forEach((stop) => stop());
+    void room?.leave();
+    Array.from(remotes.keys()).forEach(removeRemote);
+    bubbles.forEach((bubble) => disposeSprite(bubble.sprite));
+    bubbles.clear();
+    if (myLabel) disposeSprite(myLabel);
+    skinCache.forEach((texture) => texture.dispose());
     skinMaterial.dispose();
     scene.traverse((object) => {
       if (object instanceof THREE.Mesh && object.geometry) object.geometry.dispose();

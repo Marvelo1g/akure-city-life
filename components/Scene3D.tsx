@@ -1,10 +1,11 @@
 "use client";
 
 // components/Scene3D.tsx
-// The page piece that starts the 3D test world and shows a few controls on top of it.
+// The page piece that starts the 3D world and shows the chat and a few controls on top of it.
 
 import { useEffect, useRef, useState } from "react";
 import { SKINS, type SkinName } from "@/game3d/skins";
+import Chat from "@/components/Chat";
 
 export default function Scene3D() {
   // The empty box the 3D picture is drawn into.
@@ -48,6 +49,9 @@ export default function Scene3D() {
         {status && <div className="w-fit rounded-full bg-black/60 px-3 py-1">{status}</div>}
         <div className="w-fit rounded-full bg-black/60 px-3 py-1">FPS: {fps}</div>
       </div>
+
+      {/* The chat box, drawn over the bottom of the 3D world. */}
+      <Chat />
 
       {/* Buttons to try the different skins. */}
       <div className="absolute right-2 top-2 flex flex-col gap-1">
