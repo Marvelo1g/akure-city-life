@@ -9,7 +9,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { SkinName } from "@/game3d/skins";
 // The catalog of place kinds, and the South Gate zone layout.
-import { PLACE_KINDS, type Place } from "@/game3d/places";
+import { PLACE_KINDS, type Place, type Zone } from "@/game3d/places";
 import { southGate } from "@/game3d/zones/southGate";
 // Fits each building model to the space we give it.
 import { fitScale, TARGET_FOOTPRINT } from "@/game3d/fit";
@@ -62,7 +62,7 @@ const TREE_SCALE = 5;
 const FRONT_ROTATION = 0;
 
 // The zone we are building now. Later we will load a different zone as the player travels.
-const ZONE: Place[] = southGate;
+const ZONE: Zone = southGate;
 
 // What the page gives us, so it can show messages and the speed.
 type Options = {
@@ -141,12 +141,35 @@ export function startScene(container: HTMLElement, options: Options) {
   ground.receiveShadow = true;
   scene.add(ground);
 
+  // ---- Roads, plazas and roundabouts, drawn from the zone's list ----
   const roadMaterial = new THREE.MeshLambertMaterial({ color: 0x55585e });
-  const roadDown = new THREE.Mesh(new THREE.PlaneGeometry(5, WORLD_HALF * 2), roadMaterial);
-  roadDown.rotation.x = -Math.PI / 2;
-  roadDown.position.y = 0.01;
-  roadDown.receiveShadow = true;
-  scene.add(roadDown);
+  const islandMaterial = new THREE.MeshLambertMaterial({ color: 0x6fae62 });
+  ZONE.roads.forEach((road, index) => {
+    // Each piece sits a tiny bit higher than the last, so overlapping pieces never flicker.
+    const height = 0.01 + index * 0.002;
+
+    if (road.kind === "rect") {
+      const material = road.color ? new THREE.MeshLambertMaterial({ color: road.color }) : roadMaterial;
+      const flat = new THREE.Mesh(new THREE.PlaneGeometry(road.width, road.depth), material);
+      flat.rotation.x = -Math.PI / 2; // lay it flat
+      flat.position.set(road.x, height, road.z);
+      flat.receiveShadow = true;
+      scene.add(flat);
+    } else {
+      // A roundabout: a ring of road, with a grass island in the middle.
+      const ring = new THREE.Mesh(new THREE.RingGeometry(road.inner, road.outer, 48), roadMaterial);
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.set(road.x, height, road.z);
+      ring.receiveShadow = true;
+      scene.add(ring);
+
+      const island = new THREE.Mesh(new THREE.CircleGeometry(road.inner, 32), islandMaterial);
+      island.rotation.x = -Math.PI / 2;
+      island.position.set(road.x, height + 0.003, road.z);
+      island.receiveShadow = true;
+      scene.add(island);
+    }
+  });
 
   // ---- Walls the character cannot walk through. Filled in as the buildings load. ----
   const walls: Wall[] = [];
@@ -387,6 +410,23 @@ export function startScene(container: HTMLElement, options: Options) {
       addBox([0.15, 2.2, 0.15], [1.3, 1.1, 1.3], paint); // the pole
       signTop = 2.3;
       solid = false; // you can walk over a stand
+    } else if (place.shape === "stall") {
+      addBox([2.4, 0.9, 1.2], [0, 0.45, 0], grey); // the table
+      addBox([0.1, 2, 0.1], [0, 1.4, 0], grey); // the parasol pole
+      const parasol = new THREE.Mesh(new THREE.ConeGeometry(1.8, 0.6, 12), paint); // the parasol
+      parasol.position.set(0, 2.5, 0);
+      group.add(parasol);
+      signTop = 2.9;
+    } else if (place.shape === "pitch") {
+      addBox([14, 0.05, 9], [0, 0.03, 0], new THREE.MeshLambertMaterial({ color: 0x3f8f45 })); // the grass
+      const line = new THREE.MeshLambertMaterial({ color: 0xffffff });
+      addBox([14, 0.06, 0.15], [0, 0.04, 4.4], line); // the long edges
+      addBox([14, 0.06, 0.15], [0, 0.04, -4.4], line);
+      addBox([0.15, 0.06, 9], [6.9, 0.04, 0], line); // the short edges
+      addBox([0.15, 0.06, 9], [-6.9, 0.04, 0], line);
+      addBox([0.15, 0.06, 9], [0, 0.04, 0], line); // the halfway line
+      signTop = 1;
+      solid = false; // you can walk across a pitch
     } else if (place.shape === "gate") {
       addBox([1, 5, 1], [-3.5, 2.5, 0], paint); // left pillar
       addBox([1, 5, 1], [3.5, 2.5, 0], paint); // right pillar
@@ -419,7 +459,7 @@ export function startScene(container: HTMLElement, options: Options) {
       await Promise.resolve();
 
       const results = await Promise.allSettled(
-        ZONE.map(async (place) => {
+        ZONE.places.map(async (place) => {
           if (place.model) await placeModel(place, place.model);
           else if (place.shape) placeShape(place);
         }),

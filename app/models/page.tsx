@@ -1,12 +1,9 @@
-// app/models/page.tsx
-// The address /models. It shows every building model so you can choose which to use.
+import Scene3D from "@/components/Scene3D";
 
-import ModelGallery from "@/components/ModelGallery";
-
-export default function ModelsPage() {
+export default function Home() {
   return (
     <main className="h-dvh w-full">
-      <ModelGallery />
+      <Scene3D />
     </main>
   );
 }

@@ -37,7 +37,9 @@ export const PLACE_KINDS: Record<PlaceKind, { color: string }> = {
 export type PlaceShape =
   | "kiosk" // a small box shop with an awning
   | "gate" // two pillars and a beam over the road
-  | "stand"; // a flat platform with a pole, for taxi and okada stands
+  | "stand" // a flat platform with a pole, for taxi and okada stands
+  | "stall" // a market table with a parasol
+  | "pitch"; // a football pitch with white lines
 
 // One place in the world.
 export type Place = {
@@ -49,4 +51,30 @@ export type Place = {
   model?: string; // a model from the city kits, like "suburban/building-type-a" or "commercial/building-c"...
   shape?: PlaceShape; // ...or a simple shape built in code
   size?: number; // how wide the building should be in units. The default is 10.
+};
+
+// A piece of ground to draw: a road, a plaza or a roundabout.
+export type Road =
+  | {
+      // A flat rectangle, for straight roads and plazas.
+      kind: "rect";
+      x: number; // centre position
+      z: number;
+      width: number; // size along x
+      depth: number; // size along z
+      color?: number; // the default is road grey
+    }
+  | {
+      // A roundabout: a ring of road around a grass island.
+      kind: "ring";
+      x: number; // centre position
+      z: number;
+      outer: number; // radius of the outside of the road
+      inner: number; // radius of the island in the middle
+    };
+
+// One zone of the city: the ground, plus all the places in it.
+export type Zone = {
+  roads: Road[];
+  places: Place[];
 };
