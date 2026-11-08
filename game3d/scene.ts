@@ -8,9 +8,22 @@ import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import * as SkeletonUtils from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { SkinName } from "@/game3d/skins";
+// The catalog of place kinds, and the South Gate zone layout.
+import { PLACE_KINDS, type Place } from "@/game3d/places";
+import { southGate } from "@/game3d/zones/southGate";
+// Fits each building model to the space we give it.
+import { fitScale, TARGET_FOOTPRINT } from "@/game3d/fit";
 // Our connection to the game server, and the chat message shape.
 import { joinCity, type CityRoom, type NetPlayer3D } from "@/game/network";
-import { incomingChat, outgoingChat, type ChatMessage } from "@/game/bridge";
+import {
+  incomingChat,
+  incomingWhisper,
+  outgoingChat,
+  outgoingWhisper,
+  whisperTarget,
+  type ChatMessage,
+  type WhisperMessage,
+} from "@/game/bridge";
 
 // ---- Settings you can change ----
 
@@ -40,56 +53,16 @@ const RUN_URL = "/assets/3d/character/run.fbx";
 
 // ---- The city: real 3D models from the Kenney City Kit (Suburban) ----
 
-// Where the model files live. Each .glb needs the Textures folder next to it.
-const CITY_FOLDER = "/assets/3d/city/suburban/";
-// The kit models are tiny (a house is only about 1.3 units wide), so we scale them up.
-const BUILDING_SCALE = 8;
+// Where the model files live. Models are named by their kit, for example "suburban/building-type-a".
+// Each kit folder needs its own Textures folder next to its .glb files.
+const CITY_FOLDER = "/assets/3d/city/";
 // Trees use their own smaller size, so they do not tower over the houses.
-// Try 4 for smaller trees or 6 for bigger ones.
 const TREE_SCALE = 5;
 // If the doors face away from the road, change this to Math.PI (half a turn).
 const FRONT_ROTATION = 0;
 
-// One thing to put in the world: which model, where, and which way it faces.
-type Placement = { model: string; x: number; z: number; rotation: number };
-
-// The house models we use, one after another.
-const HOUSES = [
-  "building-type-a",
-  "building-type-b",
-  "building-type-c",
-  "building-type-d",
-  "building-type-e",
-  "building-type-f",
-  "building-type-g",
-  "building-type-h",
-];
-
-// A row of houses along one side of the road. "shift" starts the list at a different house.
-function houseRow(z: number, rotation: number, shift: number): Placement[] {
-  const xs = [-30, -19, -8, 8, 19, 30];
-  return xs.map((x, index) => ({
-    model: HOUSES[(index + shift) % HOUSES.length],
-    x,
-    z,
-    rotation,
-  }));
-}
-
-// Everything we place. The north row faces south, and the south row faces north.
-const PLACEMENTS: Placement[] = [
-  ...houseRow(-9, 0, 0),
-  ...houseRow(9, Math.PI, 3),
-  // Trees dotted around the edges.
-  { model: "tree-large", x: -24, z: -18, rotation: 0 },
-  { model: "tree-large", x: -13, z: -18, rotation: 0 },
-  { model: "tree-large", x: 13, z: -18, rotation: 0 },
-  { model: "tree-large", x: 24, z: -18, rotation: 0 },
-  { model: "tree-small", x: -24, z: 18, rotation: 0 },
-  { model: "tree-small", x: -13, z: 18, rotation: 0 },
-  { model: "tree-small", x: 13, z: 18, rotation: 0 },
-  { model: "tree-small", x: 24, z: 18, rotation: 0 },
-];
+// The zone we are building now. Later we will load a different zone as the player travels.
+const ZONE: Place[] = southGate;
 
 // What the page gives us, so it can show messages and the speed.
 type Options = {
@@ -169,11 +142,6 @@ export function startScene(container: HTMLElement, options: Options) {
   scene.add(ground);
 
   const roadMaterial = new THREE.MeshLambertMaterial({ color: 0x55585e });
-  const roadAcross = new THREE.Mesh(new THREE.PlaneGeometry(WORLD_HALF * 2, 5), roadMaterial);
-  roadAcross.rotation.x = -Math.PI / 2;
-  roadAcross.position.y = 0.01; // just above the ground so they do not flicker
-  roadAcross.receiveShadow = true;
-  scene.add(roadAcross);
   const roadDown = new THREE.Mesh(new THREE.PlaneGeometry(5, WORLD_HALF * 2), roadMaterial);
   roadDown.rotation.x = -Math.PI / 2;
   roadDown.position.y = 0.01;
@@ -322,7 +290,7 @@ export function startScene(container: HTMLElement, options: Options) {
     }
   })();
 
-  // ---- Loading the city models ----
+  // ---- Placing the places of the zone ----
   const gltfLoader = new GLTFLoader();
   // Each model file is loaded once, then copied for every place we use it.
   const modelCache = new Map<string, Promise<THREE.Group>>();
@@ -336,37 +304,124 @@ export function startScene(container: HTMLElement, options: Options) {
     return promise;
   }
 
+  // Adds a wall around a box, made a little bigger for the character's body.
+  function addWall(box: THREE.Box3) {
+    walls.push({
+      minX: box.min.x - BODY_RADIUS,
+      maxX: box.max.x + BODY_RADIUS,
+      minZ: box.min.z - BODY_RADIUS,
+      maxZ: box.max.z + BODY_RADIUS,
+    });
+  }
+
+  // A sign board above a place, coloured by the kind of place it is.
+  function addSign(place: Place, centerX: number, centerZ: number, top: number) {
+    const sign = makeTextSprite(place.name, {
+      fontSize: 34,
+      color: "#ffffff",
+      background: PLACE_KINDS[place.kind].color,
+      maxWidth: 360,
+      depthTest: true, // buildings in front hide it, like a real sign
+    });
+    sign.position.set(centerX, top + 0.5 + sign.scale.y / 2, centerZ);
+    scene.add(sign);
+  }
+
+  // Marks every mesh in an object so it casts and receives shadows.
+  function enableShadows(object: THREE.Object3D) {
+    object.traverse((child) => {
+      if (child instanceof THREE.Mesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
+  }
+
+  // Places a place that uses a 3D model from the city kit.
+  async function placeModel(place: Place, modelName: string) {
+    const source = await loadModel(modelName);
+    if (disposed) return;
+
+    // A copy that shares the same shapes and colours, so memory stays small.
+    const copy = source.clone(true);
+    // Trees have a fixed size. Buildings are measured and fitted to the width we want.
+    const isTree = modelName.includes("tree");
+    copy.scale.setScalar(isTree ? TREE_SCALE : fitScale(source, place.size ?? TARGET_FOOTPRINT));
+    copy.position.set(place.x, 0, place.z);
+    copy.rotation.y = place.rotation + FRONT_ROTATION;
+    enableShadows(copy);
+    scene.add(copy);
+
+    // Measure where it ended up, for its wall and its sign.
+    copy.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(copy);
+    addWall(box);
+    if (place.kind !== "decor") {
+      addSign(place, (box.min.x + box.max.x) / 2, (box.min.z + box.max.z) / 2, box.max.y);
+    }
+  }
+
+  // Builds a simple shape in code, for places the free kits do not have.
+  function placeShape(place: Place) {
+    const group = new THREE.Group();
+    const paint = new THREE.MeshLambertMaterial({ color: PLACE_KINDS[place.kind].color });
+    const grey = new THREE.MeshLambertMaterial({ color: 0x4a4f58 });
+
+    // A helper that adds one box to the group.
+    function addBox(size: [number, number, number], at: [number, number, number], material: THREE.Material) {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material);
+      mesh.position.set(...at);
+      group.add(mesh);
+    }
+
+    // Where the sign sits, and whether the whole shape blocks walking.
+    let signTop = 3;
+    let solid = true;
+
+    if (place.shape === "kiosk") {
+      addBox([2.4, 2.4, 2], [0, 1.2, 0], paint); // the shop body
+      addBox([3.2, 0.15, 1.4], [0, 2.5, 1.3], grey); // the awning over the counter
+      signTop = 2.7;
+    } else if (place.shape === "stand") {
+      addBox([3, 0.15, 3], [0, 0.08, 0], grey); // the flat platform
+      addBox([0.15, 2.2, 0.15], [1.3, 1.1, 1.3], paint); // the pole
+      signTop = 2.3;
+      solid = false; // you can walk over a stand
+    } else if (place.shape === "gate") {
+      addBox([1, 5, 1], [-3.5, 2.5, 0], paint); // left pillar
+      addBox([1, 5, 1], [3.5, 2.5, 0], paint); // right pillar
+      addBox([8.5, 1, 1], [0, 5.5, 0], paint); // the beam across the top
+      signTop = 6;
+      solid = false; // we add walls for the pillars only, below
+    }
+
+    group.position.set(place.x, 0, place.z);
+    group.rotation.y = place.rotation;
+    enableShadows(group);
+    scene.add(group);
+
+    // Walls: the whole shape for a kiosk, or just the two pillars for the gate.
+    group.updateMatrixWorld(true);
+    if (place.shape === "gate") {
+      addWall(new THREE.Box3(new THREE.Vector3(place.x - 4, 0, place.z - 0.5), new THREE.Vector3(place.x - 3, 5, place.z + 0.5)));
+      addWall(new THREE.Box3(new THREE.Vector3(place.x + 3, 0, place.z - 0.5), new THREE.Vector3(place.x + 4, 5, place.z + 0.5)));
+    } else if (solid) {
+      addWall(new THREE.Box3().setFromObject(group));
+    }
+    addSign(place, place.x, place.z, signTop);
+  }
+
+  // Places everything in the zone. allSettled lets the rest show up even if one file is missing.
   (async () => {
     try {
-      // allSettled lets the models that load show up, even if one file is missing.
+      // Wait until the rest of the world has finished setting up. Building the simple shapes
+      // needs things (like the text size for signs) that are created further down this function.
+      await Promise.resolve();
+
       const results = await Promise.allSettled(
-        PLACEMENTS.map(async (placement) => {
-          const source = await loadModel(placement.model);
-          if (disposed) return;
-
-          // A copy that shares the same shapes and colours, so memory stays small.
-          const copy = source.clone(true);
-          // Trees get the smaller tree size, everything else the building size.
-          copy.scale.setScalar(placement.model.startsWith("tree") ? TREE_SCALE : BUILDING_SCALE);
-          copy.position.set(placement.x, 0, placement.z);
-          copy.rotation.y = placement.rotation + FRONT_ROTATION;
-          copy.traverse((child) => {
-            if (child instanceof THREE.Mesh) {
-              child.castShadow = true;
-              child.receiveShadow = true;
-            }
-          });
-          scene.add(copy);
-
-          // The wall is the footprint of the placed model, made a little bigger for the character's body.
-          copy.updateMatrixWorld(true);
-          const box = new THREE.Box3().setFromObject(copy);
-          walls.push({
-            minX: box.min.x - BODY_RADIUS,
-            maxX: box.max.x + BODY_RADIUS,
-            minZ: box.min.z - BODY_RADIUS,
-            maxZ: box.max.z + BODY_RADIUS,
-          });
+        ZONE.map(async (place) => {
+          if (place.model) await placeModel(place, place.model);
+          else if (place.shape) placeShape(place);
         }),
       );
 
@@ -377,7 +432,7 @@ export function startScene(container: HTMLElement, options: Options) {
         options.onStatus(`${failed.length} city models could not load. Check public/assets/3d/city.`);
       }
     } catch (error) {
-      console.error("Could not load the city models", error);
+      console.error("Could not load the city", error);
       options.onStatus("Could not load the buildings. Check public/assets/3d/city.");
     }
   })();
@@ -408,6 +463,23 @@ export function startScene(container: HTMLElement, options: Options) {
       -((event.clientY - rect.top) / rect.height) * 2 + 1,
     );
     raycaster.setFromCamera(pointer, camera);
+
+    // First check whether the tap landed on another player. If so, pick them for a whisper
+    // instead of walking.
+    const hitboxes = Array.from(remotes.values()).map((remote) => remote.hitbox);
+    const playerHit = raycaster.intersectObjects(hitboxes, false)[0];
+    if (playerHit) {
+      const id = playerHit.object.userData.id as string;
+      const remote = remotes.get(id);
+      if (remote) {
+        whisperId = id;
+        whisperTarget.emit({ id, name: remote.net.name });
+        // Show the yellow ring at their feet so the player sees who was picked.
+        marker.position.set(remote.group.position.x, 0.03, remote.group.position.z);
+        markerLife = 0.5;
+        return;
+      }
+    }
 
     // Find where that line meets the ground.
     if (raycaster.ray.intersectPlane(groundPlane, hit)) {
@@ -496,12 +568,14 @@ export function startScene(container: HTMLElement, options: Options) {
     skin: string; // the skin they are wearing now
     material: THREE.MeshLambertMaterial;
     label: THREE.Sprite; // their name tag
+    hitbox: THREE.Mesh; // an invisible shape around them, so we can tell when they are tapped
     net: NetPlayer3D; // the live data from the server
   };
 
   const remotes = new Map<string, Remote>(); // other players, by session id
   const bubbles = new Map<string, { sprite: THREE.Sprite; expires: number }>(); // speech bubbles showing now
   let myId = ""; // our own session id
+  let whisperId: string | null = null; // the player we are about to whisper to
   let myLabel: THREE.Sprite | null = null; // our own name tag
   let lastSent = 0; // when we last told the server where we are
   let wasMoving = false;
@@ -511,7 +585,13 @@ export function startScene(container: HTMLElement, options: Options) {
   const TEXT_PIXELS_PER_UNIT = 60;
 
   // How a piece of floating text should look.
-  type TextStyle = { fontSize: number; color: string; background: string | null; maxWidth: number };
+  type TextStyle = {
+    fontSize: number;
+    color: string;
+    background: string | null;
+    maxWidth: number;
+    depthTest?: boolean; // true makes buildings hide the text when they are in front of it
+  };
 
   // Makes a flat picture of some text that always faces the camera. We use it for name tags and bubbles.
   function makeTextSprite(text: string, style: TextStyle): THREE.Sprite {
@@ -581,8 +661,10 @@ export function startScene(container: HTMLElement, options: Options) {
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
-    // depthTest off means the text shows even when a building is in front.
-    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
+    // By default the text shows even when a building is in front, which suits name tags.
+    const sprite = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: style.depthTest ?? false }),
+    );
     sprite.scale.set(canvas.width / (scale * TEXT_PIXELS_PER_UNIT), canvas.height / (scale * TEXT_PIXELS_PER_UNIT), 1);
     sprite.renderOrder = 10; // draw on top of everything else
     return sprite;
@@ -668,7 +750,17 @@ export function startScene(container: HTMLElement, options: Options) {
     const label = makeNameTag(net.name);
     group.add(label);
 
-    remotes.set(id, { group, mixer, idle, run, moving: false, skin: net.skin, material, label, net });
+    // An invisible tube around the character. Tapping it picks this player.
+    // It is wider than the body, so it is easy to hit with a finger.
+    const hitbox = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.7, 0.7, CHARACTER_HEIGHT + 0.3, 8),
+      new THREE.MeshBasicMaterial({ visible: false }),
+    );
+    hitbox.position.y = (CHARACTER_HEIGHT + 0.3) / 2;
+    hitbox.userData.id = id; // remember whose hitbox this is
+    group.add(hitbox);
+
+    remotes.set(id, { group, mixer, idle, run, moving: false, skin: net.skin, material, label, hitbox, net });
   }
 
   // Removes another player from the world.
@@ -681,6 +773,13 @@ export function startScene(container: HTMLElement, options: Options) {
       bubbles.delete(id);
     }
     disposeSprite(remote.label);
+    remote.hitbox.geometry.dispose();
+    (remote.hitbox.material as THREE.Material).dispose();
+    // If we were about to whisper to this player, clear it, because they have gone.
+    if (whisperId === id) {
+      whisperId = null;
+      whisperTarget.emit(null);
+    }
     remote.mixer.stopAllAction();
     remote.material.dispose();
     scene.remove(remote.group);
@@ -767,6 +866,17 @@ export function startScene(container: HTMLElement, options: Options) {
       joined.room.onMessage("chat", (message: ChatMessage) => {
         incomingChat.emit(message);
         showBubble(message.id, message.text);
+      });
+
+      // Whispers: send private messages to the server, and show the ones that come back.
+      cleanups.push(outgoingWhisper.on(({ to, text }) => room?.send("whisper", { to, text })));
+      joined.room.onMessage("whisper", (message: WhisperMessage) => {
+        incomingWhisper.emit({
+          mine: message.from === myId,
+          name: message.name,
+          toName: message.toName,
+          text: message.text,
+        });
       });
 
       // If the connection drops, clear the other players and carry on alone.

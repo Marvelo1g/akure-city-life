@@ -1,9 +1,9 @@
-import Game from "@/components/Game";
+import Scene3D from "@/components/Scene3D";
 
 export default function Home() {
   return (
-    <main className="h-screen w-full bg-neutral-950">
-      <Game />
+    <main className="h-dvh w-full">
+      <Scene3D />
     </main>
   );
-}
+}``
